@@ -1,8 +1,9 @@
 import RPi.GPIO as GPIO
 import time
 from tqdm.auto import tqdm
-import math
+import serial
 import threading
+import distance_control
 
 # Set up GPIO mode
 GPIO.setmode(GPIO.BOARD)
@@ -82,20 +83,36 @@ class Motor:
         for step in tqdm(range(distance)):
             self.update_edge_sensors()
             if (not self.direction_key[direction] and self.edge_sensor_i_pin_state) or (
-                self.direction_key[direction] and self.edge_sensor_f_pin_state):
+                    self.direction_key[direction] and self.edge_sensor_f_pin_state):
                 self.motor_single_step(velocity)
                 self.update_position(direction)
-            # print(self.edge_sensor_i_pin_state, self.edge_sensor_f_pin_state)
+            # print('axis', self.name, 'i: ', self.edge_sensor_i_pin_state, '     f: ', self.edge_sensor_f_pin_state)
 
     def motor_while_loop(self, velocity, direction):
         velocity = 1 / velocity
         GPIO.output(self.direction_pin, self.set_direction(direction))
-        while (not self.direction_key[direction] and self.edge_sensor_i_pin_state) or (
-                self.direction_key[direction] and self.edge_sensor_f_pin_state):
-            self.update_edge_sensors()
-            # print('i: ', self.edge_sensor_i_pin_state, '     f: ', self.edge_sensor_f_pin_state)
-            self.motor_single_step(velocity)
-            self.update_position(direction)
+        real_stop = False
+        while not real_stop:
+            while (not self.direction_key[direction] and self.edge_sensor_i_pin_state) or (
+                    self.direction_key[direction] and self.edge_sensor_f_pin_state):
+                self.update_edge_sensors()
+                # print('axis', self.name, 'i: ', self.edge_sensor_i_pin_state, '     f: ', self.edge_sensor_f_pin_state)
+                self.motor_single_step(velocity)
+                self.update_position(direction)
+
+            pin_count = []
+
+            for i in range(100):
+                self.update_edge_sensors()
+                if not self.direction_key[direction]:
+                    pin_count.append(self.edge_sensor_i_pin_state)
+                if self.direction_key[direction]:
+                    pin_count.append(self.edge_sensor_f_pin_state)
+
+            if sum(pin_count) > 20:
+                real_stop = False
+            else:
+                real_stop = True
 
     def axis_to_position(self, velocity, direction):
         velocity = 1 / velocity
@@ -112,6 +129,7 @@ class PenAxis(Motor):
         Motor.__init__(self, name=name, step_pin=step_pin, direction_pin=direction_pin,
                        edge_sensor_i_pin=edge_sensor_i_pin, edge_sensor_f_pin=edge_sensor_f_pin,
                        resolution=pen_axis_resolution)
+        self.arduino = serial.Serial('/dev/ttyACM0', 57600)
 
     def lift_pen(self):
         self.motor_for_loop(velocity=100, distance=50, direction='up')
@@ -120,19 +138,24 @@ class PenAxis(Motor):
         self.motor_while_loop(velocity=100, direction='down')
         self.motor_for_loop(velocity=100, distance=intensity, direction='down')
 
+    def distance_from_page(self):
+        return distance_control.get_stable_distance(min_value=0, max_value=1000,
+                                                    test_amount=500, arduino=self.arduino,
+                                                    stdev_limit=1.0)
+
 
 class Gantry:
     def __init__(self):
         linear_axis_resolution = 1  # float(4 * 8 * math.tan(math.radians(360 / 200)))
         z_axis_resolution = 1
-        self.x = Motor(name='x', step_pin=37, direction_pin=35,
-                       edge_sensor_i_pin=8, edge_sensor_f_pin=10,
+        self.x = Motor(name='x', step_pin=18, direction_pin=16,
+                       edge_sensor_i_pin=37, edge_sensor_f_pin=13,
                        resolution=linear_axis_resolution)
-        self.y = Motor(name='y', step_pin=36, direction_pin=32,
-                       edge_sensor_i_pin=12, edge_sensor_f_pin=11,
+        self.y = Motor(name='y', step_pin=38, direction_pin=40,
+                       edge_sensor_i_pin=31, edge_sensor_f_pin=29,
                        resolution=linear_axis_resolution)
-        self.pen = PenAxis(name='z', step_pin=40, direction_pin=38,
-                           edge_sensor_i_pin=15, edge_sensor_f_pin=13,
+        self.pen = PenAxis(name='Pen', step_pin=8, direction_pin=10,
+                           edge_sensor_i_pin=23, edge_sensor_f_pin=11,
                            pen_axis_resolution=z_axis_resolution)
         self.x_position = self.x.position
         self.y_position = self.y.position
@@ -151,14 +174,14 @@ class Gantry:
 
         self.x.position = 0
         self.y.position = 0
-        self.pen.position = 0
+        self.pen.position = self.pen.distance_from_page()
 
         self.x.motor_for_loop(100, padding, 'forward')
         self.y.motor_for_loop(100, padding, 'right')
 
         self.update_gantry_position()
 
-        print(f'Pen is above ({self.x.position}, {self.y.position}).')
+        print(f'Pen is above ({self.x.position}, {self.y.position}), at height: {self.pen.position:.2f} [mm].')
 
     def calculate_steps(self, axis_name, next_position):
         if axis_name == 'x':
@@ -233,24 +256,32 @@ if __name__ == "__main__":
     time.sleep(5)
     pad = 150
     gantry.homing_sequence(pad)
-    x_steps = 3400
-    y_steps = 2500
+    x_steps = 2500
+    y_steps = 3000
     step_delta = 300
-    # X steps amount - 3539
-    # Y steps amount - 2772
-    gantry.pen.motor_for_loop(velocity=100, distance=850, direction='down')
+    # Y steps amount - 3539
+    # X steps amount - 2772
+    # gantry.pen.motor_for_loop(velocity=100, distance=850, direction='down')
     while x_steps > step_delta and y_steps > step_delta:
-        gantry.y.motor_for_loop(velocity=100, distance=y_steps, direction='right')
-        gantry.x.motor_for_loop(velocity=100, distance=x_steps, direction='forward')
+        gantry.y.motor_for_loop(velocity=1000, distance=y_steps, direction='forward')
+        print(f'Pen is above ({gantry.x.position}, {gantry.y.position}), '
+              f'at height: {gantry.pen.distance_from_page():.2f} [mm].')
+        gantry.x.motor_for_loop(velocity=1000, distance=x_steps, direction='right')
+        print(f'Pen is above ({gantry.x.position}, {gantry.y.position}), '
+              f'at height: {gantry.pen.distance_from_page():.2f} [mm].')
         x_steps -= step_delta
         y_steps -= step_delta
-        gantry.y.motor_for_loop(velocity=100, distance=y_steps, direction='left')
-        gantry.x.motor_for_loop(velocity=100, distance=x_steps, direction='backward')
+        gantry.y.motor_for_loop(velocity=1000, distance=y_steps, direction='backward')
+        print(f'Pen is above ({gantry.x.position}, {gantry.y.position}), '
+              f'at height: {gantry.pen.distance_from_page():.2f} [mm].')
+        gantry.x.motor_for_loop(velocity=1000, distance=x_steps, direction='left')
+        print(f'Pen is above ({gantry.x.position}, {gantry.y.position}), '
+              f'at height: {gantry.pen.distance_from_page():.2f} [mm].')
         x_steps -= step_delta
         y_steps -= step_delta
 
         gantry.update_gantry_position()
 
-        print(f'X position: {gantry.x.position}')
-        print(f'Y position: {gantry.y.position}')
-        print(f'Z position: {gantry.pen.position}')
+        # print(f'X position: {gantry.x.position}')
+        # print(f'Y position: {gantry.y.position}')
+        # print(f'Z position: {gantry.pen.position}')

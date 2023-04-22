@@ -58,10 +58,24 @@ def load_image(path):
     return cv2.imread(path)
 
 
+def generate_contoures(_path):
+    image = cv2.imread(_path)
+    _, thresh = cv2.threshold(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), 0, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours
+
+
 if __name__ == "__main__":
     img = load_image(r'/home/nk47/PycharmProjects/AutoPainter/potato.jpeg')
-    # resized = resize_image(img, width=600, height=600)
-    # quantized = quantize_image(resize_image(img, width=600, height=600), 5)
     black_and_white = convert_to_bw(resize_image(img, width=600, height=600))
     painting_instructions = image_to_instructions(black_and_white, 5)
+
+    contours = generate_contoures(r'/home/nk47/PycharmProjects/AutoPainter/potato.jpeg')
+    for contour in contours:
+        points = np.squeeze(contour)
+
+        print(f'G0 X{points[0][0]} Y{points[0][1]}\n'.encode())
+        for point in points[1:]:
+            print(f'G1 X{point[0]} Y{point[1]}\n'.encode())
+
     print('a')
